@@ -1,0 +1,12 @@
+.git
+.gitlab
+target
+.cargo
+.idea
+.vscode
+
+Dockerfile*
+.gitlab-ci.yml
+
+*.log
+*.tmp
