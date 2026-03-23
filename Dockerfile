@@ -1,4 +1,4 @@
-FROM rust:1 AS build
+FROM rust:1-bookworm AS build
 WORKDIR /app
 
 RUN apt-get update \
