@@ -74,7 +74,7 @@ fn api_url(base: &str, resource: &str) -> String {
 }
 
 async fn setup_finance_sensors(
-    sensor_client: &SensorClient,
+    sensor_client: &mut SensorClient,
     sensor_url: &str,
     ticker_sensors: &[Sensor],
 ) -> Result<Vec<Sensor>> {
@@ -105,7 +105,7 @@ async fn main() -> Result<()> {
     let finance_client = FinanceClient::new();
     let http_client = reqwest::Client::new();
     let device_client = DeviceClient::new(http_client.clone());
-    let sensor_client = SensorClient::new(http_client);
+    let mut sensor_client = SensorClient::new(http_client);
     let measurement_client = MeasurementClient::new(reqwest::Client::new());
     let device_url = api_url(&cli.hemrs_url, "devices");
     let sensor_url = api_url(&cli.hemrs_url, "sensors");
@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
         tracing::info!(symbol = %ticker.symbol, "Processing ticker");
         let ticker_sensors = Vec::<Sensor>::from(&ticker);
         let resolved_sensors =
-            setup_finance_sensors(&sensor_client, &sensor_url, &ticker_sensors).await?;
+            setup_finance_sensors(&mut sensor_client, &sensor_url, &ticker_sensors).await?;
         let resources = ticker.to_finance_resources(device_id, &resolved_sensors);
 
         tracing::info!(

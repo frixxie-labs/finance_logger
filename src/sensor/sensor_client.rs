@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, anyhow};
 
 use super::SensorApi;
@@ -5,16 +7,24 @@ use super::types::Sensor;
 
 pub struct SensorClient {
     client: reqwest::Client,
+    cache: BTreeMap<String, Sensor>,
 }
 
 impl SensorClient {
     pub fn new(client: reqwest::Client) -> Self {
-        Self { client }
+        Self {
+            client,
+            cache: BTreeMap::new(),
+        }
+    }
+
+    pub fn lookup_sensor(&self, name: &str) -> Option<&Sensor> {
+        self.cache.get(name)
     }
 }
 
 impl SensorApi for SensorClient {
-    async fn get_sensors(&self, url: &str) -> Result<Vec<Sensor>> {
+    async fn get_sensors(&mut self, url: &str) -> Result<Vec<Sensor>> {
         let response = self
             .client
             .get(url)
@@ -27,10 +37,19 @@ impl SensorApi for SensorClient {
             .await
             .context("Failed to parse sensors response")?;
 
+        for sensor in &sensors {
+            self.cache.insert(sensor.name.clone(), sensor.clone());
+        }
+
         Ok(sensors)
     }
 
-    async fn setup_sensor(&self, url: &str, sensor_name: &str, sensor_unit: &str) -> Result<i32> {
+    async fn setup_sensor(&mut self, url: &str, sensor_name: &str, sensor_unit: &str) -> Result<i32> {
+        if let Some(cached) = self.lookup_sensor(sensor_name) {
+            tracing::info!("Found cached sensor: {:?}", cached);
+            return Ok(cached.id);
+        }
+
         let sensors = self.get_sensors(url).await?;
         let sensor = sensors.iter().find(|s| s.name == sensor_name);
 
@@ -91,7 +110,7 @@ mod tests {
             .create_async()
             .await;
 
-        let sensor_client = make_client();
+        let mut sensor_client = make_client();
         let result = sensor_client.get_sensors(&server.url()).await;
 
         assert!(result.is_ok());
@@ -122,7 +141,7 @@ mod tests {
             .create_async()
             .await;
 
-        let sensor_client = make_client();
+        let mut sensor_client = make_client();
         let result = sensor_client
             .setup_sensor(&server.url(), "temperature", "°C")
             .await;
@@ -164,7 +183,7 @@ mod tests {
             .create_async()
             .await;
 
-        let sensor_client = make_client();
+        let mut sensor_client = make_client();
         let result = sensor_client
             .setup_sensor(&server.url(), "temperature", "°C")
             .await;
@@ -203,7 +222,7 @@ mod tests {
             .create_async()
             .await;
 
-        let sensor_client = make_client();
+        let mut sensor_client = make_client();
         let result = sensor_client
             .setup_sensor(&server.url(), "ghost_sensor", "unit")
             .await;
@@ -226,7 +245,7 @@ mod tests {
             .create_async()
             .await;
 
-        let sensor_client = make_client();
+        let mut sensor_client = make_client();
         let result = sensor_client.get_sensors(&server.url()).await;
 
         assert!(result.is_err());
@@ -250,7 +269,7 @@ mod tests {
             .create_async()
             .await;
 
-        let sensor_client = make_client();
+        let mut sensor_client = make_client();
         let result = sensor_client
             .setup_sensor(&server.url(), "any_sensor", "any_unit")
             .await;
@@ -261,6 +280,97 @@ mod tests {
             err_msg.contains("Failed to parse sensors response"),
             "Expected parse error propagated from get_sensors, got: {err_msg}"
         );
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn should_populate_cache_after_get_sensors() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"[
+                {"id": 1, "name": "temperature", "unit": "°C"},
+                {"id": 2, "name": "humidity", "unit": "%"}
+            ]"#,
+            )
+            .create_async()
+            .await;
+
+        let mut sensor_client = make_client();
+        assert!(sensor_client.lookup_sensor("temperature").is_none());
+
+        sensor_client.get_sensors(&server.url()).await.unwrap();
+
+        let cached = sensor_client.lookup_sensor("temperature");
+        assert!(cached.is_some());
+        let sensor = cached.unwrap();
+        assert_eq!(sensor.id, 1);
+        assert_eq!(sensor.name, "temperature");
+        assert_eq!(sensor.unit, "°C");
+
+        let cached = sensor_client.lookup_sensor("humidity");
+        assert!(cached.is_some());
+        let sensor = cached.unwrap();
+        assert_eq!(sensor.id, 2);
+        assert_eq!(sensor.name, "humidity");
+        assert_eq!(sensor.unit, "%");
+
+        assert!(sensor_client.lookup_sensor("nonexistent").is_none());
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn should_update_cache_on_subsequent_get_sensors() {
+        let mut server = mockito::Server::new_async().await;
+
+        let mock_first = server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[{"id": 1, "name": "temperature", "unit": "°C"}]"#)
+            .create_async()
+            .await;
+
+        let mock_second = server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"[{"id": 1, "name": "temperature", "unit": "°F"}]"#)
+            .create_async()
+            .await;
+
+        let mut sensor_client = make_client();
+
+        sensor_client.get_sensors(&server.url()).await.unwrap();
+        assert_eq!(sensor_client.lookup_sensor("temperature").unwrap().unit, "°C");
+
+        sensor_client.get_sensors(&server.url()).await.unwrap();
+        assert_eq!(sensor_client.lookup_sensor("temperature").unwrap().unit, "°F");
+
+        mock_first.assert_async().await;
+        mock_second.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn should_not_populate_cache_on_failed_get_sensors() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("not valid json")
+            .create_async()
+            .await;
+
+        let mut sensor_client = make_client();
+        let _ = sensor_client.get_sensors(&server.url()).await;
+
+        assert!(sensor_client.lookup_sensor("temperature").is_none());
 
         mock.assert_async().await;
     }
