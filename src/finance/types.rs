@@ -1,7 +1,7 @@
 use crate::device::Device;
 use crate::measurement::NewMeasurement;
 use crate::sensor::Sensor;
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use std::fmt;
 use yfinance_rs::{
     core::conversions::{money_to_currency_str, money_to_f64},
@@ -15,7 +15,6 @@ pub struct Ticker {
     pub price: Option<f64>,
     pub volume: Option<u64>,
     pub change: Option<f64>,
-    pub timestamp: Option<u64>,
     pub open: Option<f64>,
     pub high: Option<f64>,
     pub low: Option<f64>,
@@ -56,9 +55,6 @@ impl Ticker {
             change: last_candle
                 .zip(previous_candle)
                 .map(|(last, previous)| money_to_f64(&last.close) - money_to_f64(&previous.close)),
-            timestamp: last_candle
-                .map(|candle| candle.ts.timestamp())
-                .and_then(|timestamp| u64::try_from(timestamp).ok()),
             open: last_candle.map(|candle| money_to_f64(&candle.open)),
             high: last_candle.map(|candle| money_to_f64(&candle.high)),
             low: last_candle.map(|candle| money_to_f64(&candle.low)),
@@ -88,14 +84,10 @@ impl fmt::Display for Ticker {
             .volume
             .map(|value| format!("{value} shares"))
             .unwrap_or_else(|| "n/a".to_string());
-        let timestamp = self
-            .timestamp
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "n/a".to_string());
 
         write!(
             f,
-            "{}: price {}, volume {}, change {}, open {}, high {}, low {}, timestamp {}",
+            "{}: price {}, volume {}, change {}, open {}, high {}, low {}",
             self.symbol,
             format_price(self.price),
             volume,
@@ -103,17 +95,13 @@ impl fmt::Display for Ticker {
             format_price(self.open),
             format_price(self.high),
             format_price(self.low),
-            timestamp,
         )
     }
 }
 
 impl Ticker {
     pub fn to_measurements(&self, device_id: i32, sensors: &[Sensor]) -> Vec<NewMeasurement> {
-        let timestamp = self
-            .timestamp
-            .and_then(|value| i64::try_from(value).ok())
-            .and_then(|value| Utc.timestamp_opt(value, 0).single());
+        let timestamp = Some(Utc::now());
 
         [
             ("price", self.price.map(|value| value as f32)),
@@ -169,7 +157,21 @@ mod tests {
     use yfinance_rs::core::conversions::f64_to_money_with_currency_str;
     use yfinance_rs::Candle;
 
-    use super::{FinanceResources, Ticker};
+    use super::Ticker;
+
+    /// Helper to check measurements ignoring timestamp (which is Utc::now()).
+    fn assert_measurements_match_ignoring_ts(
+        actual: &[NewMeasurement],
+        expected: &[(i32, i32, f32)],
+    ) {
+        assert_eq!(actual.len(), expected.len());
+        for (m, (device, sensor, measurement)) in actual.iter().zip(expected.iter()) {
+            assert!(m.timestamp.is_some(), "timestamp should be Some(now)");
+            assert_eq!(m.device, *device);
+            assert_eq!(m.sensor, *sensor);
+            assert_eq!(m.measurement, *measurement);
+        }
+    }
 
     fn candle(
         ts: i64,
@@ -214,7 +216,6 @@ mod tests {
         assert_eq!(ticker.price, Some(102.5));
         assert_eq!(ticker.volume, Some(2_500));
         assert_eq!(ticker.change, Some(1.5));
-        assert_eq!(ticker.timestamp, Some(1_710_086_400));
         assert_eq!(ticker.open, Some(101.5));
         assert_eq!(ticker.high, Some(103.0));
         assert_eq!(ticker.low, Some(100.5));
@@ -240,7 +241,6 @@ mod tests {
         assert_eq!(ticker.price, Some(204.0));
         assert_eq!(ticker.volume, None);
         assert_eq!(ticker.change, None);
-        assert_eq!(ticker.timestamp, Some(1_710_000_000));
     }
 
     #[test]
@@ -252,7 +252,6 @@ mod tests {
         assert_eq!(ticker.price, None);
         assert_eq!(ticker.volume, None);
         assert_eq!(ticker.change, None);
-        assert_eq!(ticker.timestamp, None);
         assert_eq!(ticker.open, None);
         assert_eq!(ticker.high, None);
         assert_eq!(ticker.low, None);
@@ -333,7 +332,6 @@ mod tests {
             price: Some(150.0),
             volume: Some(42),
             change: Some(-1.2),
-            timestamp: Some(1_710_086_400),
             open: Some(151.0),
             high: Some(152.0),
             low: Some(149.5),
@@ -359,7 +357,6 @@ mod tests {
             price: Some(102.5),
             volume: Some(2_500),
             change: Some(1.5),
-            timestamp: Some(1_710_086_400),
             open: Some(101.5),
             high: Some(103.0),
             low: Some(100.5),
@@ -367,7 +364,7 @@ mod tests {
 
         assert_eq!(
             ticker.to_string(),
-            "AAPL: price 102.50 USD, volume 2500 shares, change 1.50 USD, open 101.50 USD, high 103.00 USD, low 100.50 USD, timestamp 1710086400"
+            "AAPL: price 102.50 USD, volume 2500 shares, change 1.50 USD, open 101.50 USD, high 103.00 USD, low 100.50 USD"
         );
     }
 
@@ -379,7 +376,6 @@ mod tests {
             price: None,
             volume: None,
             change: None,
-            timestamp: None,
             open: None,
             high: None,
             low: None,
@@ -387,7 +383,7 @@ mod tests {
 
         assert_eq!(
             ticker.to_string(),
-            "NVDA: price n/a, volume n/a, change n/a, open n/a, high n/a, low n/a, timestamp n/a"
+            "NVDA: price n/a, volume n/a, change n/a, open n/a, high n/a, low n/a"
         );
     }
 
@@ -411,7 +407,6 @@ mod tests {
             price: Some(102.5),
             volume: Some(2_500),
             change: Some(1.5),
-            timestamp: Some(1_710_086_400),
             open: Some(101.5),
             high: Some(103.0),
             low: Some(100.5),
@@ -449,46 +444,16 @@ mod tests {
             },
         ];
 
-        assert_eq!(
-            ticker.to_measurements(7, &sensors),
-            vec![
-                NewMeasurement::new_with_ts(
-                    Utc.timestamp_opt(1_710_086_400, 0).single().unwrap(),
-                    7,
-                    11,
-                    102.5,
-                ),
-                NewMeasurement::new_with_ts(
-                    Utc.timestamp_opt(1_710_086_400, 0).single().unwrap(),
-                    7,
-                    12,
-                    2_500.0,
-                ),
-                NewMeasurement::new_with_ts(
-                    Utc.timestamp_opt(1_710_086_400, 0).single().unwrap(),
-                    7,
-                    13,
-                    1.5,
-                ),
-                NewMeasurement::new_with_ts(
-                    Utc.timestamp_opt(1_710_086_400, 0).single().unwrap(),
-                    7,
-                    14,
-                    101.5,
-                ),
-                NewMeasurement::new_with_ts(
-                    Utc.timestamp_opt(1_710_086_400, 0).single().unwrap(),
-                    7,
-                    15,
-                    103.0,
-                ),
-                NewMeasurement::new_with_ts(
-                    Utc.timestamp_opt(1_710_086_400, 0).single().unwrap(),
-                    7,
-                    16,
-                    100.5,
-                ),
-            ]
+        assert_measurements_match_ignoring_ts(
+            &ticker.to_measurements(7, &sensors),
+            &[
+                (7, 11, 102.5),
+                (7, 12, 2_500.0),
+                (7, 13, 1.5),
+                (7, 14, 101.5),
+                (7, 15, 103.0),
+                (7, 16, 100.5),
+            ],
         );
     }
 
@@ -500,7 +465,6 @@ mod tests {
             price: Some(875.25),
             volume: None,
             change: None,
-            timestamp: None,
             open: Some(870.0),
             high: None,
             low: None,
@@ -511,15 +475,12 @@ mod tests {
             unit: "USD".to_string(),
         }];
 
-        assert_eq!(
-            ticker.to_measurements(3, &sensors),
-            vec![NewMeasurement {
-                timestamp: None,
-                device: 3,
-                sensor: 21,
-                measurement: 875.25,
-            }]
-        );
+        let measurements = ticker.to_measurements(3, &sensors);
+        assert_eq!(measurements.len(), 1);
+        assert!(measurements[0].timestamp.is_some());
+        assert_eq!(measurements[0].device, 3);
+        assert_eq!(measurements[0].sensor, 21);
+        assert_eq!(measurements[0].measurement, 875.25);
     }
 
     #[test]
@@ -530,7 +491,6 @@ mod tests {
             price: Some(102.5),
             volume: Some(2_500),
             change: None,
-            timestamp: Some(1_710_086_400),
             open: Some(101.5),
             high: None,
             low: Some(100.5),
@@ -558,42 +518,25 @@ mod tests {
             },
         ];
 
+        let resources = ticker.to_finance_resources(9, &sensors);
+
         assert_eq!(
-            ticker.to_finance_resources(9, &sensors),
-            FinanceResources {
-                device: Device {
-                    id: 9,
-                    name: "finance".to_string(),
-                    location: "finance".to_string(),
-                },
-                sensors: sensors.clone(),
-                measurements: vec![
-                    NewMeasurement::new_with_ts(
-                        Utc.timestamp_opt(1_710_086_400, 0).single().unwrap(),
-                        9,
-                        31,
-                        102.5,
-                    ),
-                    NewMeasurement::new_with_ts(
-                        Utc.timestamp_opt(1_710_086_400, 0).single().unwrap(),
-                        9,
-                        32,
-                        2_500.0,
-                    ),
-                    NewMeasurement::new_with_ts(
-                        Utc.timestamp_opt(1_710_086_400, 0).single().unwrap(),
-                        9,
-                        33,
-                        101.5,
-                    ),
-                    NewMeasurement::new_with_ts(
-                        Utc.timestamp_opt(1_710_086_400, 0).single().unwrap(),
-                        9,
-                        34,
-                        100.5,
-                    ),
-                ],
+            resources.device,
+            Device {
+                id: 9,
+                name: "finance".to_string(),
+                location: "finance".to_string(),
             }
+        );
+        assert_eq!(resources.sensors, sensors);
+        assert_measurements_match_ignoring_ts(
+            &resources.measurements,
+            &[
+                (9, 31, 102.5),
+                (9, 32, 2_500.0),
+                (9, 33, 101.5),
+                (9, 34, 100.5),
+            ],
         );
     }
 }
