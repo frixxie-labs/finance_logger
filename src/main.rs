@@ -1,6 +1,6 @@
 use anyhow::Result;
 use structopt::StructOpt;
-use tracing::Level;
+use tracing::{Level, info, warn};
 use tracing_subscriber::FmtSubscriber;
 
 mod device;
@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
     let cli = Cli::from_args();
     init_tracing(cli.log_level.clone());
 
-    tracing::info!(symbols = ?cli.symbols, hemrs_url = %cli.hemrs_url, "Starting finance logger");
+    info!(symbols = ?cli.symbols, hemrs_url = %cli.hemrs_url, "Starting finance logger");
 
     let finance_client = FinanceClient::new();
     let http_client = reqwest::Client::new();
@@ -111,25 +111,25 @@ async fn main() -> Result<()> {
     let sensor_url = api_url(&cli.hemrs_url, "sensors");
     let measurement_url = api_url(&cli.hemrs_url, "measurements");
     let symbols = cli.symbols.iter().map(String::as_str).collect::<Vec<_>>();
-    tracing::info!(count = symbols.len(), "Fetching tickers");
+    info!(count = symbols.len(), "Fetching tickers");
     let tickers = finance_client.get_tickers(&symbols).await?;
-    tracing::info!(count = tickers.len(), "Fetched tickers successfully");
+    info!(count = tickers.len(), "Fetched tickers successfully");
 
     let finance_device = finance::Ticker::finance_device();
     let device_id = device_client
         .setup_device(&device_url, &finance_device.name, &finance_device.location)
         .await?;
-    tracing::info!(device_id, "Shared finance device ready");
+    info!(device_id, "Shared finance device ready");
     let mut all_measurements = Vec::<NewMeasurement>::new();
 
     for ticker in tickers {
-        tracing::info!(symbol = %ticker.symbol, "Processing ticker");
+        info!(symbol = %ticker.symbol, "Processing ticker");
         let ticker_sensors = Vec::<Sensor>::from(&ticker);
         let resolved_sensors =
             setup_finance_sensors(&mut sensor_client, &sensor_url, &ticker_sensors).await?;
         let resources = ticker.to_finance_resources(device_id, &resolved_sensors);
 
-        tracing::info!(
+        info!(
             symbol = %ticker.symbol,
             sensors = resources.sensors.len(),
             measurements = resources.measurements.len(),
@@ -137,18 +137,18 @@ async fn main() -> Result<()> {
         );
 
         if resources.measurements.is_empty() {
-            tracing::warn!(symbol = %ticker.symbol, "No measurements generated for ticker");
+            warn!(symbol = %ticker.symbol, "No measurements generated for ticker");
         } else {
             all_measurements.extend(resources.measurements.iter().cloned());
-            tracing::info!(
+            info!(
                 symbol = %ticker.symbol,
                 measurements = resources.measurements.len(),
                 "Prepared ticker measurements"
             );
         }
 
-        tracing::info!("{ticker}");
-        tracing::info!(
+        info!("{ticker}");
+        info!(
             "device={} sensors={} measurements={}",
             resources.device.id,
             resources.sensors.len(),
@@ -157,18 +157,18 @@ async fn main() -> Result<()> {
     }
 
     if all_measurements.is_empty() {
-        tracing::warn!("No ticker measurements to store");
+        warn!("No ticker measurements to store");
     } else {
         measurement_client
             .store_measurements(&measurement_url, &all_measurements)
             .await?;
-        tracing::info!(
+        info!(
             measurements = all_measurements.len(),
             "Stored ticker measurements batch"
         );
     }
 
-    tracing::info!("Finance logger completed");
+    info!("Finance logger completed");
 
     Ok(())
 }
