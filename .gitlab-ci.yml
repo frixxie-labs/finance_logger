@@ -1,4 +1,5 @@
 stages:
+  - lint
   - build
   - test
   - deploy
@@ -13,6 +14,15 @@ default:
     paths:
       - .cargo/
       - target/
+
+lint:
+  stage: lint
+  before_script:
+    - apt-get update && apt-get install --yes --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/*
+    - rustup component add clippy
+  script:
+    - cargo fmt --all --check
+    - cargo clippy --locked --all-targets --all-features -- -D warnings
 
 build:
   stage: build
