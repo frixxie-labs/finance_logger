@@ -184,12 +184,13 @@ mod tests {
     ) -> Candle {
         Candle {
             ts: Utc.timestamp_opt(ts, 0).single().unwrap(),
-            open: f64_to_money_with_currency_str(open, Some(unit)),
-            high: f64_to_money_with_currency_str(high, Some(unit)),
-            low: f64_to_money_with_currency_str(low, Some(unit)),
-            close: f64_to_money_with_currency_str(close, Some(unit)),
+            open: f64_to_money_with_currency_str(open, Some(unit)).into(),
+            high: f64_to_money_with_currency_str(high, Some(unit)).into(),
+            low: f64_to_money_with_currency_str(low, Some(unit)).into(),
+            close: f64_to_money_with_currency_str(close, Some(unit)).into(),
             close_unadj: None,
             volume,
+            provider: (),
         }
     }
 
