@@ -21,7 +21,7 @@ struct Cli {
     #[structopt(long, default_value = "http://hemrs/")]
     hemrs_url: String,
 
-    #[structopt(long, default_value = "info")]
+    #[structopt(long, default_value = "warn")]
     log_level: LogLevel,
 }
 
