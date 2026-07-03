@@ -3,10 +3,23 @@ use crate::measurement::NewMeasurement;
 use crate::sensor::Sensor;
 use chrono::Utc;
 use std::fmt;
-use yfinance_rs::{
-    core::conversions::{money_to_currency_str, money_to_f64},
-    Candle,
-};
+use yfinance_rs::{Candle, PriceAmount, QuantityAmount};
+
+fn price_amount_to_f64(value: &PriceAmount) -> f64 {
+    value
+        .as_decimal()
+        .to_string()
+        .parse()
+        .expect("decimal price amount should fit in f64")
+}
+
+fn quantity_amount_to_u64(value: &QuantityAmount) -> u64 {
+    value
+        .as_decimal()
+        .to_string()
+        .parse()
+        .expect("decimal quantity amount should fit in u64")
+}
 
 #[derive(Debug, Clone)]
 pub struct Ticker {
@@ -44,20 +57,23 @@ impl Ticker {
             None
         };
         let unit = last_candle
-            .and_then(|candle| money_to_currency_str(&candle.close))
+            .map(|candle| candle.currency.to_string())
             .unwrap_or_else(|| "USD".to_string());
 
         Self {
             symbol: symbol.to_string(),
             unit,
-            price: last_candle.map(|candle| money_to_f64(&candle.close)),
-            volume: last_candle.and_then(|candle| candle.volume),
+            price: last_candle.map(|candle| price_amount_to_f64(&candle.ohlc.close)),
+            volume: last_candle.and_then(|candle| candle.volume.as_ref().map(quantity_amount_to_u64)),
             change: last_candle
                 .zip(previous_candle)
-                .map(|(last, previous)| money_to_f64(&last.close) - money_to_f64(&previous.close)),
-            open: last_candle.map(|candle| money_to_f64(&candle.open)),
-            high: last_candle.map(|candle| money_to_f64(&candle.high)),
-            low: last_candle.map(|candle| money_to_f64(&candle.low)),
+                .map(|(last, previous)| {
+                    price_amount_to_f64(&last.ohlc.close)
+                        - price_amount_to_f64(&previous.ohlc.close)
+                }),
+            open: last_candle.map(|candle| price_amount_to_f64(&candle.ohlc.open)),
+            high: last_candle.map(|candle| price_amount_to_f64(&candle.ohlc.high)),
+            low: last_candle.map(|candle| price_amount_to_f64(&candle.ohlc.low)),
         }
     }
 
@@ -154,8 +170,8 @@ mod tests {
     use crate::measurement::NewMeasurement;
     use crate::sensor::Sensor;
     use chrono::{TimeZone, Utc};
-    use yfinance_rs::core::conversions::f64_to_money_with_currency_str;
-    use yfinance_rs::Candle;
+    use std::str::FromStr;
+    use yfinance_rs::{Candle, Currency, Decimal, Ohlc, PriceAmount, QuantityAmount};
 
     use super::Ticker;
 
@@ -173,6 +189,14 @@ mod tests {
         }
     }
 
+    fn price_amount(value: f64) -> PriceAmount {
+        PriceAmount::new(Decimal::from_str(&value.to_string()).unwrap())
+    }
+
+    fn quantity_amount(value: u64) -> QuantityAmount {
+        QuantityAmount::from_decimal(Decimal::from(value)).unwrap()
+    }
+
     fn candle(
         ts: i64,
         unit: &str,
@@ -184,12 +208,15 @@ mod tests {
     ) -> Candle {
         Candle {
             ts: Utc.timestamp_opt(ts, 0).single().unwrap(),
-            open: f64_to_money_with_currency_str(open, Some(unit)).into(),
-            high: f64_to_money_with_currency_str(high, Some(unit)).into(),
-            low: f64_to_money_with_currency_str(low, Some(unit)).into(),
-            close: f64_to_money_with_currency_str(close, Some(unit)).into(),
+            currency: Currency::from_str(unit).unwrap(),
+            ohlc: Ohlc::new(
+                price_amount(open),
+                price_amount(high),
+                price_amount(low),
+                price_amount(close),
+            ),
             close_unadj: None,
-            volume,
+            volume: volume.map(quantity_amount),
             provider: (),
         }
     }
