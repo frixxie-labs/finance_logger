@@ -64,6 +64,8 @@ impl From<LogLevel> for Level {
 fn init_tracing(log_level: LogLevel) {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::from(log_level))
+        .json()
+        .flatten_event(true)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).unwrap();

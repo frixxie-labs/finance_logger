@@ -33,6 +33,25 @@ finance_logger AAPL MSFT EQNR.OL --hemrs-url http://localhost:8080 --log-level d
 | `--hemrs-url` | `http://hemrs/` | Base URL of the hemrs REST API |
 | `--log-level` | `info` | Log level: trace, debug, info, warn, error |
 
+### Logging
+
+Logs are written to standard error as newline-delimited JSON, ready for VictoriaLogs' JSON stream API. Configure the collector or ingestion request to use these fields:
+
+| VictoriaLogs setting | Value |
+|---|---|
+| `_msg_field` / `VL-Msg-Field` | `message` |
+| `_time_field` / `VL-Time-Field` | `timestamp` |
+| `_stream_fields` / `VL-Stream-Fields` | `target` |
+
+For example, logs can be sent directly to VictoriaLogs with:
+
+```bash
+finance_logger 2>&1 | curl -X POST \
+  -H 'Content-Type: application/stream+json' \
+  --data-binary @- \
+  'http://localhost:9428/insert/jsonline?_msg_field=message&_time_field=timestamp&_stream_fields=target'
+```
+
 ## Test
 
 ```bash
