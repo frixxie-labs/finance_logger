@@ -29,7 +29,9 @@ impl FinanceApi for FinanceClient {
         let tickers = results
             .entries
             .iter()
-            .map(|entry| Ticker::from_candles(entry.instrument.symbol.as_str(), &entry.history.candles))
+            .map(|entry| {
+                Ticker::from_candles(entry.instrument.symbol.as_str(), &entry.history.candles)
+            })
             .collect();
 
         Ok(tickers)

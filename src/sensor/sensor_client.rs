@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, anyhow};
 
-use super::SensorApi;
-use super::types::Sensor;
+use super::{NewSensor, Sensor, SensorApi};
 
 pub struct SensorClient {
     client: reqwest::Client,
@@ -44,45 +43,32 @@ impl SensorApi for SensorClient {
         Ok(sensors)
     }
 
-    async fn setup_sensor(&mut self, url: &str, sensor_name: &str, sensor_unit: &str) -> Result<i32> {
-        if let Some(cached) = self.lookup_sensor(sensor_name) {
+    async fn setup_sensor(&mut self, url: &str, sensor: &NewSensor) -> Result<Sensor> {
+        if let Some(cached) = self.lookup_sensor(&sensor.name) {
             tracing::info!("Found cached sensor: {:?}", cached);
-            return Ok(cached.id);
+            return Ok(cached.clone());
         }
 
-        let sensors = self.get_sensors(url).await?;
-        let sensor = sensors.iter().find(|s| s.name == sensor_name);
+        let find = |sensors: Vec<Sensor>| sensors.into_iter().find(|s| sensor.matches(s));
 
-        match sensor {
-            Some(s) => {
-                tracing::info!("Found existing sensor: {:?}", s);
-                Ok(s.id)
-            }
-            None => {
-                let new_sensor = Sensor {
-                    id: 0,
-                    name: sensor_name.to_string(),
-                    unit: sensor_unit.to_string(),
-                };
-
-                let response = self
-                    .client
-                    .post(url)
-                    .json(&new_sensor)
-                    .send()
-                    .await
-                    .context("Failed to create sensor")?;
-
-                tracing::info!("Created new sensor: {:?}", response);
-
-                let sensors = self.get_sensors(url).await?;
-                sensors
-                    .iter()
-                    .find(|s| s.name == sensor_name)
-                    .map(|s| s.id)
-                    .ok_or_else(|| anyhow!("Sensor not found after creation"))
-            }
+        if let Some(existing) = find(self.get_sensors(url).await?) {
+            tracing::info!("Found existing sensor: {:?}", existing);
+            return Ok(existing);
         }
+
+        let response = self
+            .client
+            .post(url)
+            .json(sensor)
+            .send()
+            .await
+            .context("Failed to create sensor")?
+            .error_for_status()
+            .context("hemrs rejected sensor creation")?;
+
+        tracing::info!("Created new sensor: {:?}", response);
+
+        find(self.get_sensors(url).await?).ok_or_else(|| anyhow!("Sensor not found after creation"))
     }
 }
 
@@ -92,6 +78,13 @@ mod tests {
 
     fn make_client() -> SensorClient {
         SensorClient::new(reqwest::Client::new())
+    }
+
+    fn new_sensor(name: &str, unit: &str) -> NewSensor {
+        NewSensor {
+            name: name.to_string(),
+            unit: unit.to_string(),
+        }
     }
 
     #[tokio::test]
@@ -143,11 +136,11 @@ mod tests {
 
         let mut sensor_client = make_client();
         let result = sensor_client
-            .setup_sensor(&server.url(), "temperature", "°C")
+            .setup_sensor(&server.url(), &new_sensor("temperature", "°C"))
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 1);
+        assert_eq!(result.unwrap().id, 1);
         mock_get.assert_async().await;
     }
 
@@ -185,11 +178,11 @@ mod tests {
 
         let mut sensor_client = make_client();
         let result = sensor_client
-            .setup_sensor(&server.url(), "temperature", "°C")
+            .setup_sensor(&server.url(), &new_sensor("temperature", "°C"))
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 2);
+        assert_eq!(result.unwrap().id, 2);
 
         mock_get_empty.assert_async().await;
         mock_post.assert_async().await;
@@ -224,7 +217,7 @@ mod tests {
 
         let mut sensor_client = make_client();
         let result = sensor_client
-            .setup_sensor(&server.url(), "ghost_sensor", "unit")
+            .setup_sensor(&server.url(), &new_sensor("ghost_sensor", "unit"))
             .await;
 
         assert!(result.is_err());
@@ -271,7 +264,7 @@ mod tests {
 
         let mut sensor_client = make_client();
         let result = sensor_client
-            .setup_sensor(&server.url(), "any_sensor", "any_unit")
+            .setup_sensor(&server.url(), &new_sensor("any_sensor", "any_unit"))
             .await;
 
         assert!(result.is_err());
@@ -347,10 +340,16 @@ mod tests {
         let mut sensor_client = make_client();
 
         sensor_client.get_sensors(&server.url()).await.unwrap();
-        assert_eq!(sensor_client.lookup_sensor("temperature").unwrap().unit, "°C");
+        assert_eq!(
+            sensor_client.lookup_sensor("temperature").unwrap().unit,
+            "°C"
+        );
 
         sensor_client.get_sensors(&server.url()).await.unwrap();
-        assert_eq!(sensor_client.lookup_sensor("temperature").unwrap().unit, "°F");
+        assert_eq!(
+            sensor_client.lookup_sensor("temperature").unwrap().unit,
+            "°F"
+        );
 
         mock_first.assert_async().await;
         mock_second.assert_async().await;
@@ -375,4 +374,32 @@ mod tests {
         mock.assert_async().await;
     }
 
+    #[tokio::test]
+    async fn should_return_error_when_sensor_creation_is_rejected() {
+        let mut server = mockito::Server::new_async().await;
+        let mock_get = server
+            .mock("GET", "/")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("[]")
+            .create_async()
+            .await;
+        let mock_post = server
+            .mock("POST", "/")
+            .with_status(500)
+            .create_async()
+            .await;
+
+        let result = make_client()
+            .setup_sensor(&server.url(), &new_sensor("temperature", "°C"))
+            .await;
+
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("hemrs rejected sensor creation"),
+            "Expected rejection error, got: {err_msg}"
+        );
+        mock_get.assert_async().await;
+        mock_post.assert_async().await;
+    }
 }

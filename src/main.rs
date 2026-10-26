@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Utc;
 use structopt::StructOpt;
 use tracing::{Level, info, warn};
 use tracing_subscriber::FmtSubscriber;
@@ -10,8 +11,8 @@ mod sensor;
 
 use device::{DeviceApi, DeviceClient};
 use finance::{FinanceApi, FinanceClient};
-use measurement::{MeasurementApi, MeasurementClient, NewMeasurement};
-use sensor::{Sensor, SensorApi, SensorClient};
+use measurement::{MeasurementApi, MeasurementClient};
+use sensor::{NewSensor, Sensor, SensorApi, SensorClient};
 
 #[derive(Debug, StructOpt)]
 struct Cli {
@@ -61,101 +62,78 @@ impl From<LogLevel> for Level {
     }
 }
 
-fn init_tracing(log_level: LogLevel) {
+fn init_tracing(log_level: LogLevel) -> Result<()> {
     let subscriber = FmtSubscriber::builder()
         .with_max_level(Level::from(log_level))
         .json()
         .flatten_event(true)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber).unwrap();
+    tracing::subscriber::set_global_default(subscriber)?;
+    Ok(())
 }
 
 fn api_url(base: &str, resource: &str) -> String {
     format!("{}/api/{resource}", base.trim_end_matches('/'))
 }
 
-async fn setup_finance_sensors(
+async fn register_sensors(
     sensor_client: &mut SensorClient,
     sensor_url: &str,
-    ticker_sensors: &[Sensor],
+    sensors: &[NewSensor],
 ) -> Result<Vec<Sensor>> {
-    let mut resolved_sensors = Vec::with_capacity(ticker_sensors.len());
-
-    for sensor in ticker_sensors {
-        let sensor_id = sensor_client
-            .setup_sensor(sensor_url, &sensor.name, &sensor.unit)
-            .await?;
-
-        resolved_sensors.push(Sensor {
-            id: sensor_id,
-            name: sensor.name.clone(),
-            unit: sensor.unit.clone(),
-        });
+    let mut registered = Vec::with_capacity(sensors.len());
+    for sensor in sensors {
+        registered.push(sensor_client.setup_sensor(sensor_url, sensor).await?);
     }
-
-    Ok(resolved_sensors)
+    Ok(registered)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::from_args();
-    init_tracing(cli.log_level.clone());
+    init_tracing(cli.log_level.clone())?;
 
     info!(symbols = ?cli.symbols, hemrs_url = %cli.hemrs_url, "Starting finance logger");
 
     let finance_client = FinanceClient::new();
     let http_client = reqwest::Client::new();
     let device_client = DeviceClient::new(http_client.clone());
-    let mut sensor_client = SensorClient::new(http_client);
-    let measurement_client = MeasurementClient::new(reqwest::Client::new());
+    let mut sensor_client = SensorClient::new(http_client.clone());
+    let measurement_client = MeasurementClient::new(http_client);
     let device_url = api_url(&cli.hemrs_url, "devices");
     let sensor_url = api_url(&cli.hemrs_url, "sensors");
     let measurement_url = api_url(&cli.hemrs_url, "measurements");
+
     let symbols = cli.symbols.iter().map(String::as_str).collect::<Vec<_>>();
     info!(count = symbols.len(), "Fetching tickers");
     let tickers = finance_client.get_tickers(&symbols).await?;
     info!(count = tickers.len(), "Fetched tickers successfully");
 
-    let finance_device = finance::Ticker::finance_device();
     let device_id = device_client
-        .setup_device(&device_url, &finance_device.name, &finance_device.location)
+        .setup_device(&device_url, &finance::finance_device())
         .await?;
     info!(device_id, "Shared finance device ready");
-    let mut all_measurements = Vec::<NewMeasurement>::new();
 
-    for ticker in tickers {
-        info!(symbol = %ticker.symbol, "Processing ticker");
-        let ticker_sensors = Vec::<Sensor>::from(&ticker);
-        let resolved_sensors =
-            setup_finance_sensors(&mut sensor_client, &sensor_url, &ticker_sensors).await?;
-        let resources = ticker.to_finance_resources(device_id, &resolved_sensors);
+    let timestamp = Utc::now();
+    let mut all_measurements = Vec::new();
 
-        info!(
-            symbol = %ticker.symbol,
-            sensors = resources.sensors.len(),
-            measurements = resources.measurements.len(),
-            "Prepared finance resources"
-        );
+    for ticker in &tickers {
+        info!("{ticker}");
+        let sensors = register_sensors(&mut sensor_client, &sensor_url, &ticker.sensors()).await?;
+        let measurements = ticker.to_measurements(timestamp, device_id, &sensors);
 
-        if resources.measurements.is_empty() {
+        if measurements.is_empty() {
             warn!(symbol = %ticker.symbol, "No measurements generated for ticker");
         } else {
-            all_measurements.extend(resources.measurements.iter().cloned());
             info!(
                 symbol = %ticker.symbol,
-                measurements = resources.measurements.len(),
+                sensors = sensors.len(),
+                measurements = measurements.len(),
                 "Prepared ticker measurements"
             );
         }
-
-        info!("{ticker}");
-        info!(
-            "device={} sensors={} measurements={}",
-            resources.device.id,
-            resources.sensors.len(),
-            resources.measurements.len()
-        );
+        all_measurements.extend(measurements);
     }
 
     if all_measurements.is_empty() {

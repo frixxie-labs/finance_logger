@@ -48,7 +48,11 @@ mod tests {
     #[tokio::test]
     async fn stores_measurements_successfully() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server.mock("POST", "/").with_status(200).create_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(200)
+            .create_async()
+            .await;
 
         let result = make_client()
             .store_measurements(&server.url(), &make_measurements())
@@ -61,7 +65,11 @@ mod tests {
     #[tokio::test]
     async fn returns_error_when_storage_rejects_measurements() {
         let mut server = mockito::Server::new_async().await;
-        let mock = server.mock("POST", "/").with_status(500).create_async().await;
+        let mock = server
+            .mock("POST", "/")
+            .with_status(500)
+            .create_async()
+            .await;
 
         let result = make_client()
             .store_measurements(&server.url(), &make_measurements())

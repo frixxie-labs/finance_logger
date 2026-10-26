@@ -1,11 +1,24 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+/// A sensor that has been registered with hemrs and therefore has an id.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
 pub struct Sensor {
-    #[serde(skip_serializing)]
     pub id: i32,
     pub name: String,
     pub unit: String,
+}
+
+/// A sensor description that has not yet been registered with hemrs.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+pub struct NewSensor {
+    pub name: String,
+    pub unit: String,
+}
+
+impl NewSensor {
+    pub fn matches(&self, sensor: &Sensor) -> bool {
+        self.name == sensor.name
+    }
 }
 
 #[cfg(test)]
@@ -23,31 +36,32 @@ mod tests {
         }
     }
 
+    impl Arbitrary for NewSensor {
+        fn arbitrary(g: &mut Gen) -> Self {
+            NewSensor {
+                name: String::arbitrary(g),
+                unit: String::arbitrary(g),
+            }
+        }
+    }
+
     quickcheck! {
-        fn prop_identical_sensors_are_equal(sensor: Sensor) -> bool {
-            sensor == sensor.clone()
-        }
-
-        fn prop_serialization_excludes_id(sensor: Sensor) -> bool {
-            let json = serde_json::to_string(&sensor).unwrap();
-            !json.contains("\"id\"")
-        }
-
-        fn prop_serialization_preserves_name_and_unit(sensor: Sensor) -> bool {
-            let json = serde_json::to_string(&sensor).unwrap();
-            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-            parsed["name"] == sensor.name && parsed["unit"] == sensor.unit
+        fn prop_new_sensor_serializes_exactly_name_and_unit(sensor: NewSensor) -> bool {
+            let value = serde_json::to_value(&sensor).unwrap();
+            value == serde_json::json!({ "name": sensor.name, "unit": sensor.unit })
         }
 
         fn prop_deserialization_round_trips(sensor: Sensor) -> bool {
-            let json = format!(
-                r#"{{"id":{},"name":{},"unit":{}}}"#,
-                sensor.id,
-                serde_json::to_string(&sensor.name).unwrap(),
-                serde_json::to_string(&sensor.unit).unwrap()
-            );
-            let parsed: Sensor = serde_json::from_str(&json).unwrap();
-            parsed == sensor
+            let json = serde_json::json!({
+                "id": sensor.id,
+                "name": sensor.name,
+                "unit": sensor.unit,
+            });
+            serde_json::from_value::<Sensor>(json).unwrap() == sensor
+        }
+
+        fn prop_new_sensor_matches_registered_sensor_with_same_name(sensor: Sensor) -> bool {
+            NewSensor { name: sensor.name.clone(), unit: String::new() }.matches(&sensor)
         }
     }
 }

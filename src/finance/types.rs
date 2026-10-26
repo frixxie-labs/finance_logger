@@ -1,27 +1,48 @@
-use crate::device::Device;
-use crate::measurement::NewMeasurement;
-use crate::sensor::Sensor;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::fmt;
 use yfinance_rs::{Candle, PriceAmount, QuantityAmount};
 
-fn price_amount_to_f64(value: &PriceAmount) -> f64 {
-    value
-        .as_decimal()
-        .to_string()
-        .parse()
-        .expect("decimal price amount should fit in f64")
+use crate::device::{DeviceId, NewDevice};
+use crate::measurement::NewMeasurement;
+use crate::sensor::{NewSensor, Sensor};
+
+const DEFAULT_UNIT: &str = "USD";
+const VOLUME_UNIT: &str = "shares";
+
+/// The values tracked for every ticker. Each metric maps to one hemrs sensor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Metric {
+    Price,
+    Volume,
+    Change,
+    Open,
+    High,
+    Low,
 }
 
-fn quantity_amount_to_u64(value: &QuantityAmount) -> u64 {
-    value
-        .as_decimal()
-        .to_string()
-        .parse()
-        .expect("decimal quantity amount should fit in u64")
+impl Metric {
+    pub const ALL: [Metric; 6] = [
+        Metric::Price,
+        Metric::Volume,
+        Metric::Change,
+        Metric::Open,
+        Metric::High,
+        Metric::Low,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Metric::Price => "price",
+            Metric::Volume => "volume",
+            Metric::Change => "change",
+            Metric::Open => "open",
+            Metric::High => "high",
+            Metric::Low => "low",
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Ticker {
     pub symbol: String,
     pub unit: String,
@@ -33,59 +54,102 @@ pub struct Ticker {
     pub low: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct FinanceResources {
-    pub device: Device,
-    pub sensors: Vec<Sensor>,
-    pub measurements: Vec<NewMeasurement>,
+/// The single hemrs device that all ticker sensors belong to.
+pub fn finance_device() -> NewDevice {
+    NewDevice {
+        name: "finance".to_string(),
+        location: "finance".to_string(),
+    }
+}
+
+fn price_to_f64(value: &PriceAmount) -> Option<f64> {
+    value.as_decimal().to_string().parse().ok()
+}
+
+fn quantity_to_u64(value: &QuantityAmount) -> Option<u64> {
+    value.as_decimal().to_string().parse().ok()
 }
 
 impl Ticker {
-    pub fn finance_device() -> Device {
-        Device {
-            id: 0,
-            name: "finance".to_string(),
-            location: "finance".to_string(),
-        }
-    }
-
     pub(crate) fn from_candles(symbol: &str, candles: &[Candle]) -> Self {
-        let last_candle = candles.last();
-        let previous_candle = if candles.len() > 1 {
-            candles.get(candles.len() - 2)
-        } else {
-            None
+        let (previous, last) = match candles {
+            [.., previous, last] => (Some(previous), Some(last)),
+            [last] => (None, Some(last)),
+            [] => (None, None),
         };
-        let unit = last_candle
-            .map(|candle| candle.currency.to_string())
-            .unwrap_or_else(|| "USD".to_string());
+        let close = |candle: &Candle| price_to_f64(&candle.ohlc.close);
 
         Self {
             symbol: symbol.to_string(),
-            unit,
-            price: last_candle.map(|candle| price_amount_to_f64(&candle.ohlc.close)),
-            volume: last_candle.and_then(|candle| candle.volume.as_ref().map(quantity_amount_to_u64)),
-            change: last_candle
-                .zip(previous_candle)
-                .map(|(last, previous)| {
-                    price_amount_to_f64(&last.ohlc.close)
-                        - price_amount_to_f64(&previous.ohlc.close)
-                }),
-            open: last_candle.map(|candle| price_amount_to_f64(&candle.ohlc.open)),
-            high: last_candle.map(|candle| price_amount_to_f64(&candle.ohlc.high)),
-            low: last_candle.map(|candle| price_amount_to_f64(&candle.ohlc.low)),
+            unit: last.map_or_else(|| DEFAULT_UNIT.to_string(), |c| c.currency.to_string()),
+            price: last.and_then(close),
+            volume: last
+                .and_then(|c| c.volume.as_ref())
+                .and_then(quantity_to_u64),
+            change: last
+                .and_then(close)
+                .zip(previous.and_then(close))
+                .map(|(last, previous)| last - previous),
+            open: last.and_then(|c| price_to_f64(&c.ohlc.open)),
+            high: last.and_then(|c| price_to_f64(&c.ohlc.high)),
+            low: last.and_then(|c| price_to_f64(&c.ohlc.low)),
         }
     }
 
-    pub fn to_finance_resources(&self, device_id: i32, sensors: &[Sensor]) -> FinanceResources {
-        FinanceResources {
-            device: Device {
-                id: device_id,
-                ..Self::finance_device()
-            },
-            sensors: sensors.to_vec(),
-            measurements: self.to_measurements(device_id, sensors),
+    fn value(&self, metric: Metric) -> Option<f64> {
+        match metric {
+            Metric::Price => self.price,
+            Metric::Volume => self.volume.map(|value| value as f64),
+            Metric::Change => self.change,
+            Metric::Open => self.open,
+            Metric::High => self.high,
+            Metric::Low => self.low,
         }
+    }
+
+    fn unit_of(&self, metric: Metric) -> &str {
+        match metric {
+            Metric::Volume => VOLUME_UNIT,
+            _ => &self.unit,
+        }
+    }
+
+    fn sensor_name(&self, metric: Metric) -> String {
+        format!("{}_{}", self.symbol, metric.name())
+    }
+
+    /// The sensors required to record every metric of this ticker.
+    pub fn sensors(&self) -> Vec<NewSensor> {
+        Metric::ALL
+            .into_iter()
+            .map(|metric| NewSensor {
+                name: self.sensor_name(metric),
+                unit: self.unit_of(metric).to_string(),
+            })
+            .collect()
+    }
+
+    /// Measurements for every metric that has a value and a matching registered sensor.
+    pub fn to_measurements(
+        &self,
+        timestamp: DateTime<Utc>,
+        device: DeviceId,
+        sensors: &[Sensor],
+    ) -> Vec<NewMeasurement> {
+        Metric::ALL
+            .into_iter()
+            .filter_map(|metric| {
+                let value = self.value(metric)?;
+                let name = self.sensor_name(metric);
+                let sensor = sensors.iter().find(|sensor| sensor.name == name)?;
+                Some(NewMeasurement::new_with_ts(
+                    timestamp,
+                    device,
+                    sensor.id,
+                    value as f32,
+                ))
+            })
+            .collect()
     }
 }
 
@@ -96,10 +160,10 @@ impl fmt::Display for Ticker {
             None => "n/a".to_string(),
         };
 
-        let volume = self
-            .volume
-            .map(|value| format!("{value} shares"))
-            .unwrap_or_else(|| "n/a".to_string());
+        let volume = self.volume.map_or_else(
+            || "n/a".to_string(),
+            |value| format!("{value} {VOLUME_UNIT}"),
+        );
 
         write!(
             f,
@@ -115,79 +179,13 @@ impl fmt::Display for Ticker {
     }
 }
 
-impl Ticker {
-    pub fn to_measurements(&self, device_id: i32, sensors: &[Sensor]) -> Vec<NewMeasurement> {
-        let timestamp = Some(Utc::now());
-
-        [
-            ("price", self.price.map(|value| value as f32)),
-            ("volume", self.volume.map(|value| value as f32)),
-            ("change", self.change.map(|value| value as f32)),
-            ("open", self.open.map(|value| value as f32)),
-            ("high", self.high.map(|value| value as f32)),
-            ("low", self.low.map(|value| value as f32)),
-        ]
-        .into_iter()
-        .filter_map(|(name, measurement)| {
-            let measurement = measurement?;
-            let sensor_name = format!("{}_{}", self.symbol, name);
-            let sensor = sensors.iter().find(|sensor| sensor.name == sensor_name)?;
-
-            Some(NewMeasurement {
-                timestamp,
-                device: device_id,
-                sensor: sensor.id,
-                measurement,
-            })
-        })
-        .collect()
-    }
-}
-
-impl From<&Ticker> for Vec<Sensor> {
-    fn from(ticker: &Ticker) -> Self {
-        [
-            ("price", ticker.unit.as_str()),
-            ("volume", "shares"),
-            ("change", ticker.unit.as_str()),
-            ("open", ticker.unit.as_str()),
-            ("high", ticker.unit.as_str()),
-            ("low", ticker.unit.as_str()),
-        ]
-        .into_iter()
-        .map(|(name, unit)| Sensor {
-            id: 0,
-            name: format!("{}_{}", ticker.symbol, name),
-            unit: unit.to_string(),
-        })
-        .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::device::Device;
-    use crate::measurement::NewMeasurement;
-    use crate::sensor::Sensor;
-    use chrono::{TimeZone, Utc};
+    use super::*;
+    use chrono::TimeZone;
+    use quickcheck::{Arbitrary, Gen, quickcheck};
     use std::str::FromStr;
-    use yfinance_rs::{Candle, Currency, Decimal, Ohlc, PriceAmount, QuantityAmount};
-
-    use super::Ticker;
-
-    /// Helper to check measurements ignoring timestamp (which is Utc::now()).
-    fn assert_measurements_match_ignoring_ts(
-        actual: &[NewMeasurement],
-        expected: &[(i32, i32, f32)],
-    ) {
-        assert_eq!(actual.len(), expected.len());
-        for (m, (device, sensor, measurement)) in actual.iter().zip(expected.iter()) {
-            assert!(m.timestamp.is_some(), "timestamp should be Some(now)");
-            assert_eq!(m.device, *device);
-            assert_eq!(m.sensor, *sensor);
-            assert_eq!(m.measurement, *measurement);
-        }
-    }
+    use yfinance_rs::{Currency, Decimal, Ohlc};
 
     fn price_amount(value: f64) -> PriceAmount {
         PriceAmount::new(Decimal::from_str(&value.to_string()).unwrap())
@@ -221,6 +219,63 @@ mod tests {
         }
     }
 
+    fn timestamp() -> DateTime<Utc> {
+        Utc.timestamp_opt(1_710_086_400, 0).single().unwrap()
+    }
+
+    fn sensor(id: i32, name: &str, unit: &str) -> Sensor {
+        Sensor {
+            id,
+            name: name.to_string(),
+            unit: unit.to_string(),
+        }
+    }
+
+    impl Arbitrary for Ticker {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let finite = |g: &mut Gen| Option::<f64>::arbitrary(g).filter(|v| v.is_finite());
+            Ticker {
+                symbol: String::arbitrary(g),
+                unit: String::arbitrary(g),
+                price: finite(g),
+                volume: Option::<u64>::arbitrary(g),
+                change: finite(g),
+                open: finite(g),
+                high: finite(g),
+                low: finite(g),
+            }
+        }
+    }
+
+    quickcheck! {
+        fn prop_one_sensor_per_metric(ticker: Ticker) -> bool {
+            ticker.sensors().len() == Metric::ALL.len()
+        }
+
+        fn prop_sensor_names_are_prefixed_with_symbol(ticker: Ticker) -> bool {
+            ticker
+                .sensors()
+                .iter()
+                .all(|sensor| sensor.name.starts_with(&format!("{}_", ticker.symbol)))
+        }
+
+        fn prop_one_measurement_per_present_value_when_all_sensors_exist(ticker: Ticker) -> bool {
+            let sensors: Vec<Sensor> = ticker
+                .sensors()
+                .into_iter()
+                .zip(1..)
+                .map(|(new, id)| Sensor { id, name: new.name, unit: new.unit })
+                .collect();
+            let present = Metric::ALL.iter().filter(|m| ticker.value(**m).is_some()).count();
+
+            ticker.to_measurements(timestamp(), 1, &sensors).len() == present
+        }
+
+        fn prop_no_measurements_without_sensors(ticker: Ticker) -> bool {
+            ticker.to_measurements(timestamp(), 1, &[]).is_empty()
+        }
+    }
+
     #[test]
     fn builds_ticker_from_latest_candle() {
         let ticker = Ticker::from_candles(
@@ -239,14 +294,19 @@ mod tests {
             ],
         );
 
-        assert_eq!(ticker.symbol, "AAPL");
-        assert_eq!(ticker.unit, "USD");
-        assert_eq!(ticker.price, Some(102.5));
-        assert_eq!(ticker.volume, Some(2_500));
-        assert_eq!(ticker.change, Some(1.5));
-        assert_eq!(ticker.open, Some(101.5));
-        assert_eq!(ticker.high, Some(103.0));
-        assert_eq!(ticker.low, Some(100.5));
+        assert_eq!(
+            ticker,
+            Ticker {
+                symbol: "AAPL".to_string(),
+                unit: "USD".to_string(),
+                price: Some(102.5),
+                volume: Some(2_500),
+                change: Some(1.5),
+                open: Some(101.5),
+                high: Some(103.0),
+                low: Some(100.5),
+            }
+        );
     }
 
     #[test]
@@ -264,8 +324,6 @@ mod tests {
             )],
         );
 
-        assert_eq!(ticker.symbol, "MSFT");
-        assert_eq!(ticker.unit, "USD");
         assert_eq!(ticker.price, Some(204.0));
         assert_eq!(ticker.volume, None);
         assert_eq!(ticker.change, None);
@@ -275,67 +333,18 @@ mod tests {
     fn builds_empty_ticker_when_no_candles_exist() {
         let ticker = Ticker::from_candles("NVDA", &[]);
 
-        assert_eq!(ticker.symbol, "NVDA");
-        assert_eq!(ticker.unit, "USD");
-        assert_eq!(ticker.price, None);
-        assert_eq!(ticker.volume, None);
-        assert_eq!(ticker.change, None);
-        assert_eq!(ticker.open, None);
-        assert_eq!(ticker.high, None);
-        assert_eq!(ticker.low, None);
-    }
-
-    #[test]
-    fn converts_ticker_to_sensors() {
-        let ticker = Ticker::from_candles(
-            "EQNR.OL",
-            &[candle(
-                1_710_086_400,
-                "NOK",
-                101.5,
-                103.0,
-                100.5,
-                102.5,
-                Some(2_500),
-            )],
-        );
-
-        let sensors = Vec::<Sensor>::from(&ticker);
-
         assert_eq!(
-            sensors,
-            vec![
-                Sensor {
-                    id: 0,
-                    name: "EQNR.OL_price".to_string(),
-                    unit: "NOK".to_string(),
-                },
-                Sensor {
-                    id: 0,
-                    name: "EQNR.OL_volume".to_string(),
-                    unit: "shares".to_string(),
-                },
-                Sensor {
-                    id: 0,
-                    name: "EQNR.OL_change".to_string(),
-                    unit: "NOK".to_string(),
-                },
-                Sensor {
-                    id: 0,
-                    name: "EQNR.OL_open".to_string(),
-                    unit: "NOK".to_string(),
-                },
-                Sensor {
-                    id: 0,
-                    name: "EQNR.OL_high".to_string(),
-                    unit: "NOK".to_string(),
-                },
-                Sensor {
-                    id: 0,
-                    name: "EQNR.OL_low".to_string(),
-                    unit: "NOK".to_string(),
-                },
-            ]
+            ticker,
+            Ticker {
+                symbol: "NVDA".to_string(),
+                unit: "USD".to_string(),
+                price: None,
+                volume: None,
+                change: None,
+                open: None,
+                high: None,
+                low: None,
+            }
         );
     }
 
@@ -353,28 +362,35 @@ mod tests {
     }
 
     #[test]
-    fn converts_manual_ticker_to_sensors_with_expected_units() {
-        let ticker = Ticker {
-            symbol: "TEL.OL".to_string(),
-            unit: "NOK".to_string(),
-            price: Some(150.0),
-            volume: Some(42),
-            change: Some(-1.2),
-            open: Some(151.0),
-            high: Some(152.0),
-            low: Some(149.5),
+    fn converts_ticker_to_sensors_with_expected_names_and_units() {
+        let ticker = Ticker::from_candles(
+            "EQNR.OL",
+            &[candle(
+                1_710_086_400,
+                "NOK",
+                101.5,
+                103.0,
+                100.5,
+                102.5,
+                Some(2_500),
+            )],
+        );
+
+        let new_sensor = |name: &str, unit: &str| NewSensor {
+            name: name.to_string(),
+            unit: unit.to_string(),
         };
-
-        let sensors = Vec::<Sensor>::from(&ticker);
-
-        assert_eq!(sensors.len(), 6);
-        assert!(sensors.iter().all(|sensor| sensor.id == 0));
-        assert_eq!(sensors[0].unit, "NOK");
-        assert_eq!(sensors[1].unit, "shares");
-        assert_eq!(sensors[2].unit, "NOK");
-        assert_eq!(sensors[3].unit, "NOK");
-        assert_eq!(sensors[4].unit, "NOK");
-        assert_eq!(sensors[5].unit, "NOK");
+        assert_eq!(
+            ticker.sensors(),
+            vec![
+                new_sensor("EQNR.OL_price", "NOK"),
+                new_sensor("EQNR.OL_volume", "shares"),
+                new_sensor("EQNR.OL_change", "NOK"),
+                new_sensor("EQNR.OL_open", "NOK"),
+                new_sensor("EQNR.OL_high", "NOK"),
+                new_sensor("EQNR.OL_low", "NOK"),
+            ]
+        );
     }
 
     #[test]
@@ -398,16 +414,7 @@ mod tests {
 
     #[test]
     fn displays_ticker_with_missing_fields_as_na() {
-        let ticker = Ticker {
-            symbol: "NVDA".to_string(),
-            unit: "USD".to_string(),
-            price: None,
-            volume: None,
-            change: None,
-            open: None,
-            high: None,
-            low: None,
-        };
+        let ticker = Ticker::from_candles("NVDA", &[]);
 
         assert_eq!(
             ticker.to_string(),
@@ -418,9 +425,8 @@ mod tests {
     #[test]
     fn builds_shared_finance_device() {
         assert_eq!(
-            Ticker::finance_device(),
-            Device {
-                id: 0,
+            finance_device(),
+            NewDevice {
                 name: "finance".to_string(),
                 location: "finance".to_string(),
             }
@@ -440,48 +446,25 @@ mod tests {
             low: Some(100.5),
         };
         let sensors = vec![
-            Sensor {
-                id: 11,
-                name: "EQNR.OL_price".to_string(),
-                unit: "NOK".to_string(),
-            },
-            Sensor {
-                id: 12,
-                name: "EQNR.OL_volume".to_string(),
-                unit: "shares".to_string(),
-            },
-            Sensor {
-                id: 13,
-                name: "EQNR.OL_change".to_string(),
-                unit: "NOK".to_string(),
-            },
-            Sensor {
-                id: 14,
-                name: "EQNR.OL_open".to_string(),
-                unit: "NOK".to_string(),
-            },
-            Sensor {
-                id: 15,
-                name: "EQNR.OL_high".to_string(),
-                unit: "NOK".to_string(),
-            },
-            Sensor {
-                id: 16,
-                name: "EQNR.OL_low".to_string(),
-                unit: "NOK".to_string(),
-            },
+            sensor(11, "EQNR.OL_price", "NOK"),
+            sensor(12, "EQNR.OL_volume", "shares"),
+            sensor(13, "EQNR.OL_change", "NOK"),
+            sensor(14, "EQNR.OL_open", "NOK"),
+            sensor(15, "EQNR.OL_high", "NOK"),
+            sensor(16, "EQNR.OL_low", "NOK"),
         ];
 
-        assert_measurements_match_ignoring_ts(
-            &ticker.to_measurements(7, &sensors),
-            &[
-                (7, 11, 102.5),
-                (7, 12, 2_500.0),
-                (7, 13, 1.5),
-                (7, 14, 101.5),
-                (7, 15, 103.0),
-                (7, 16, 100.5),
-            ],
+        let ts = timestamp();
+        assert_eq!(
+            ticker.to_measurements(ts, 7, &sensors),
+            vec![
+                NewMeasurement::new_with_ts(ts, 7, 11, 102.5),
+                NewMeasurement::new_with_ts(ts, 7, 12, 2_500.0),
+                NewMeasurement::new_with_ts(ts, 7, 13, 1.5),
+                NewMeasurement::new_with_ts(ts, 7, 14, 101.5),
+                NewMeasurement::new_with_ts(ts, 7, 15, 103.0),
+                NewMeasurement::new_with_ts(ts, 7, 16, 100.5),
+            ]
         );
     }
 
@@ -497,74 +480,12 @@ mod tests {
             high: None,
             low: None,
         };
-        let sensors = vec![Sensor {
-            id: 21,
-            name: "NVDA_price".to_string(),
-            unit: "USD".to_string(),
-        }];
+        let sensors = vec![sensor(21, "NVDA_price", "USD")];
 
-        let measurements = ticker.to_measurements(3, &sensors);
-        assert_eq!(measurements.len(), 1);
-        assert!(measurements[0].timestamp.is_some());
-        assert_eq!(measurements[0].device, 3);
-        assert_eq!(measurements[0].sensor, 21);
-        assert_eq!(measurements[0].measurement, 875.25);
-    }
-
-    #[test]
-    fn builds_finance_resources_in_one_call() {
-        let ticker = Ticker {
-            symbol: "AAPL".to_string(),
-            unit: "USD".to_string(),
-            price: Some(102.5),
-            volume: Some(2_500),
-            change: None,
-            open: Some(101.5),
-            high: None,
-            low: Some(100.5),
-        };
-        let sensors = vec![
-            Sensor {
-                id: 31,
-                name: "AAPL_price".to_string(),
-                unit: "USD".to_string(),
-            },
-            Sensor {
-                id: 32,
-                name: "AAPL_volume".to_string(),
-                unit: "shares".to_string(),
-            },
-            Sensor {
-                id: 33,
-                name: "AAPL_open".to_string(),
-                unit: "USD".to_string(),
-            },
-            Sensor {
-                id: 34,
-                name: "AAPL_low".to_string(),
-                unit: "USD".to_string(),
-            },
-        ];
-
-        let resources = ticker.to_finance_resources(9, &sensors);
-
+        let ts = timestamp();
         assert_eq!(
-            resources.device,
-            Device {
-                id: 9,
-                name: "finance".to_string(),
-                location: "finance".to_string(),
-            }
-        );
-        assert_eq!(resources.sensors, sensors);
-        assert_measurements_match_ignoring_ts(
-            &resources.measurements,
-            &[
-                (9, 31, 102.5),
-                (9, 32, 2_500.0),
-                (9, 33, 101.5),
-                (9, 34, 100.5),
-            ],
+            ticker.to_measurements(ts, 3, &sensors),
+            vec![NewMeasurement::new_with_ts(ts, 3, 21, 875.25)]
         );
     }
 }
